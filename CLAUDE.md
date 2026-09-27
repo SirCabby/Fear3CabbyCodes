@@ -23,6 +23,10 @@ The log (`Fear3CabbyCodes.log`), ini (`Fear3CabbyCodes.ini`) and ImGui layout fi
 DLL in the game folder. `Trace = 1` adds diagnostics; `AlwaysShow = 1` draws the panel outside the
 pause menu (rendering test); `Disable = overlay,dispatch,game` bisects a fault.
 
+`tests/test_adopt.cpp` runs the renderer hooks under Wine with the Steam overlay's way of hooking
+played by the test (build and run commands in its header; `F3CC_ADOPT=1` makes the proxy take the
+Windows path under Wine). See "The panel's hooks on Windows" below.
+
 ## ⛔ Rules
 
 - **Never patch `F.E.A.R. 3.exe` on disk** (CEG). Proxy DLL plus in-memory hooks only.
@@ -32,6 +36,9 @@ pause menu (rendering test); `Disable = overlay,dispatch,game` bisects a fault.
 - **Game calls only on the main thread** (`dispatch.cpp`'s `PeekMessageA` hook, primary thread only).
   The receiver hooks run on whatever thread the game sends the message from and only touch atomics
   and the message.
+- **On Windows, no function of the mod's in a vtable another hooker reads.** The game's swap chains
+  and D3D9 devices get vtables of their own (`src/adopt.cpp`); the classes' vtables are left alone.
+  See "The panel's hooks on Windows".
 - **Never call a game function on a guessed layout.** Every slot and field here came from the game's
   own code that uses it; `game.cpp` re-checks the accessor bytes per vtable before the first use.
 - The user commits every repo himself — do not `git commit`/`push` unless asked.
@@ -198,6 +205,62 @@ the body's started-at clock at now, covering both a decremented and a clock-meas
 ### Pause / in-level gating
 As in the siblings: `HasPlayerStartedLevel(player)` (called) and `MenuMgr::IsPauseMenuShowing`
 (slot 69 on the `+4` subobject of the heap-scanned MenuMgr).
+
+## The panel's hooks on Windows (src/adopt.cpp, overlay_dx11.cpp, overlay_dx9.cpp)
+**1.0.0 crashed on every launch on Windows** (a Windows 11 laptop, 2026-09-27; fine under Proton):
+the log stopped after `dx11: swap chain ... captured`, no frame ever reached the mod's Present, and
+the Event Log had `APPCRASH` with `0xC00000FD` (stack overflow) in `KERNELBASE.dll` +0x1602B4. The
+Steam overlay's own log (`Steam\logs\gameoverlay_renderer.txt`, `.previous.txt` for the run before)
+told the rest. F.E.A.R. 3 makes its D3D11 swap chain **twice** at start (the first ~7 s later released,
+the second made on the same device, at the same address). `gameoverlayrenderer.dll` (32-bit) hooks
+each new swap chain inside its own CreateSwapChain detour (`0x1007f0d0`, called only from its six
+factory hooks, right after creation): it checks that slot 0 (QueryInterface) is in `dxgi.dll`, then
+for slots 2, 8, 10, 13 (Release, Present, SetFullscreenState, ResizeBuffers; then 22 of
+IDXGISwapChain1 and 38/39 of IDXGISwapChain3, by QueryInterface) writes a jump into **whatever
+function the slot points to at that moment** unless that function is its own detour already, and
+keeps **one** saved original per hook. The mod had put Present/ResizeBuffers into DXGI's class vtable
+after the first pass, so the second pass took the mod's functions: `Unknown opcodes for X86 at 3
+bytes: 83 EC 5C C7 04 24 ... module=steam_api.dll,DXGISwapChain_Present` (it cannot decode mingw's
+`sub esp,0x5C; mov [esp],1`), and ResizeBuffers detoured, its saved original now the mod's function,
+whose own original was DXGI's ResizeBuffers - the overlay's detour since the first pass. The game's
+next ResizeBuffers went round the two (`Releasing all resources for device` logged 32 145 times) until
+the stack ran out. RE2CabbyCodes met the same thing on 2026-09-25 (64-bit overlay).
+
+**The fix, on Windows only** (`adopt::enabled()`: not Wine, or `F3CC_ADOPT` in the environment): each
+swap chain the factory makes for **the game's window** - a window of this process made by the thread
+that loaded the mod, the primary thread, which pumps the game's messages and presents (render thread =
+tick thread under Proton) - gets a private copy of its vtable (64 slots: a class may have virtual
+functions of its own after IDXGISwapChain4's 41, as OptiScaler's wrapper does, plus the two entries
+before the vtable for RTTI) with the mod's Present (8) and ResizeBuffers (13), and its vtable pointer
+moves to the copy; D3D9 devices the same (192 slots; EndScene 42, Reset 16 - the overlay detours the
+device class's Release 2, CreateAdditionalSwapChain 13, GetSwapChain 14, Reset 16, Present 17 and more
+at every CreateDevice, so a second device would loop the same way on Reset). The overlay only ever
+reads a new object's vtable before the mod adopts it, so it only ever finds the class's own
+functions. The hooks call on through the vtable the object had, **as it is at the time** (`original()`,
+so a tool that hooks the class's vtable later still gets the frames), falling back on what it held at
+adoption when that slot holds a function of the mod's, when that vtable is another tool's copy (it may
+be freed), or while a call on is under way on the thread (`calling_on()`: a hook that calls the
+object's vtable again). A swap chain or device for another window keeps its class's vtable (logged
+as `is not the game's`, the first 8). The DLL pins itself (adopted objects point into it). **Left in
+place, on both platforms**: the factory's CreateSwapChain (slot 10; the overlay's factory pass skips a
+slot pointing outside `dxgi.dll` - "points to another module, skipping hooks") and IDirect3D9's
+CreateDevice (slot 16; with the overlay that object is its own `IWrapIDirect3D9`, whose vtable it
+never reads again). **Under Wine** the class vtables are hooked as before (the Linux overlay does not
+hook this way). `tests/test_adopt.cpp` plays the overlay (its hooks in the class vtable, one saved
+original each, "already hooked" skipped, a depth guard instead of the stack overflow): the 1.0.0 DLL
+loops in pass two on both APIs (`LOOP`, 17 and 9 failures); the fix passes all checks, and the
+Wine path still takes the class hook. **Not yet seen in game** on Windows, nor re-checked under Proton.
+
+**Exit**: 1.0.0 tore its hooks down in `DLL_PROCESS_DETACH` on process exit too - releasing the
+D3D11/D3D9 device, ImGui, the window procedure, under the loader lock with every other thread already
+ended. Under Wine the test process hung there until killed (the log ends at `unloading - removing
+hooks`, never `hooks removed cleanly`); RE0CabbyCodes hung the game that way on Windows (2026-09-25).
+With `reserved` non-null (a process exit, not a FreeLibrary) DllMain now does nothing
+(`process exiting - leaving the hooks for the OS to reclaim`).
+
+**Sibling mods**: Fear3ChallengeGrant and Fear3TimeManager still hook the classes' vtables the 1.0.0
+way; on Windows with the Steam overlay either of them alone should crash the game the same way, and
+with either installed the overlay's saved originals lead into its functions whatever this mod does.
 
 ## Tooling notes
 - Ghidra headless (`/opt/ghidra/support/analyzeHeadless`, `MAXMEM=12G`) analyses the exe in ~11

@@ -54,7 +54,7 @@ DWORD WINAPI mod_thread(LPVOID) {
 
 }  // namespace
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
   switch (reason) {
     case DLL_PROCESS_ATTACH: {
       g_self = module;
@@ -86,6 +86,15 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
       break;
     }
     case DLL_PROCESS_DETACH:
+      // `reserved` is non-null when the whole process is ending (not a
+      // FreeLibrary). Windows has already ended every other thread by then and
+      // this runs under the loader lock, so touching the window, the Direct3D
+      // device or ImGui here is unsafe - RE0CabbyCodes hung the game on close
+      // that way on Windows (2026-09-25). The OS reclaims all of it: do nothing.
+      if (reserved) {
+        f3cc::logf("process exiting - leaving the hooks for the OS to reclaim");
+        break;
+      }
       // Undo every patch before this image goes away: anything still pointing
       // into the DLL would fault the moment the game touched it during its own
       // teardown.
