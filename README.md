@@ -78,7 +78,7 @@ Linux with mingw-w64 (`i686-w64-mingw32-g++`); no Windows or MSVC needed.
 cp config.mk.example config.mk   # set GAME_DIR
 make                             # build/steam_api.dll
 make install                     # deploy into GAME_DIR (renames the stock DLL once)
-make rev 1.1.0                   # set the version (VERSION file, baked into the DLL)
+make version 1.1.0               # set the version (VERSION file, baked into the DLL)
 make package                     # dist/Fear3CabbyCodes_v<version>.zip
 make proxy                       # regenerate the export list from the stock DLL
 ```

@@ -14,7 +14,7 @@ capture, gotchas) and `../Fear3TimeManager`; only what is specific to the cheats
 make            # -> build/steam_api.dll   (config.mk sets GAME_DIR; gitignored)
 make install    # rename stock steam_api.dll -> steam_api_orig.dll (once), deploy ours atomically
 make uninstall  # restore the stock DLL
-make rev X.Y.Z  # set the version;  make package -> dist/Fear3CabbyCodes_vX.Y.Z.zip
+make version X.Y.Z  # set the version;  make package -> dist/Fear3CabbyCodes_vX.Y.Z.zip
 make proxy      # regenerate steam_api.def + src/proxy_exports.inc from the stock DLL's export table
 python3 tools/find_regs.py --exe "$GAME_DIR/F.E.A.R. 3.exe" --name GetInventoryItems   # etc.
 ```
@@ -249,7 +249,24 @@ never reads again). **Under Wine** the class vtables are hooked as before (the L
 hook this way). `tests/test_adopt.cpp` plays the overlay (its hooks in the class vtable, one saved
 original each, "already hooked" skipped, a depth guard instead of the stack overflow): the 1.0.0 DLL
 loops in pass two on both APIs (`LOOP`, 17 and 9 failures); the fix passes all checks, and the
-Wine path still takes the class hook. **Not yet seen in game** on Windows, nor re-checked under Proton.
+Wine path still takes the class hook. **Seen in game on Windows** (the laptop, 2026-09-27 13:18): the
+factory hooked in place (`was dxgi.dll+0xA76A0`), both swap chains adopted at the same address
+(`0B561598`, window class `Afx:00400000:...`, thread 8684 = the tick's), the panel's renderer up, a
+level started. Not re-checked under Proton.
+
+**Open: a crash as the game quit, in the game's own code** (that same run, 13:19:23, 12 s after the
+level started; quit from inside the level, the log has no `level ended`): `0xC0000005` at
+`F.E.A.R. 3.exe+0x5760DD` - the middle of `cmp edi,8` in a bit reader at `0x976080` (the disk and the
+laptop's `.text` are identical), so a jump through a stale pointer. The overlay's log for the run ends
+with the game's shutdown (input devices deleted, `DeleteD3D11RendererForSwapChain`, `Found a hooked
+function in now unloaded module`), and `d3d11.dll` was no longer loaded (its NVIDIA/Intel UMDs still
+were); the mod's log has no `process exiting`, so DllMain was not reached. Not yet known whether the
+mod is involved: two candidates are the tick's calls into the game (`HasPlayerStartedLevel` ->
+`GetPlayer`, walking the player pair vector) while the level is torn down, and the references the
+mod and ImGui's DX11 backend hold on the game's device and context (the device outlives the game's
+own release, then `d3d11.dll` is unloaded under it). WER local dumps (`LocalDumps\F.E.A.R. 3.exe`,
+minidumps to `C:\Users\Joshua\CrashDumps`) are on on the laptop for the next one; a run without the
+mod, quitting the same way, would say whether the game does it alone.
 
 **Exit**: 1.0.0 tore its hooks down in `DLL_PROCESS_DETACH` on process exit too - releasing the
 D3D11/D3D9 device, ImGui, the window procedure, under the loader lock with every other thread already
@@ -258,9 +275,11 @@ hooks`, never `hooks removed cleanly`); RE0CabbyCodes hung the game that way on 
 With `reserved` non-null (a process exit, not a FreeLibrary) DllMain now does nothing
 (`process exiting - leaving the hooks for the OS to reclaim`).
 
-**Sibling mods**: Fear3ChallengeGrant and Fear3TimeManager still hook the classes' vtables the 1.0.0
-way; on Windows with the Steam overlay either of them alone should crash the game the same way, and
-with either installed the overlay's saved originals lead into its functions whatever this mod does.
+**Sibling mods**: Fear3ChallengeGrant and Fear3TimeManager had the same renderer code and the same
+teardown (their Linux logs, too, always end at `unloading - removing hooks`); both have the same
+fix since 2026-09-27 (their 1.1.0 loops and hangs in the test; the fix passes). With a sibling that
+still hooks the classes' vtables installed, the overlay's saved originals lead into that sibling's
+functions whatever this mod does, so all three need the fixed builds on Windows.
 
 ## Tooling notes
 - Ghidra headless (`/opt/ghidra/support/analyzeHeadless`, `MAXMEM=12G`) analyses the exe in ~11
